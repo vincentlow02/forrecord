@@ -27,6 +27,9 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/icon.ico"],
+    "license": "MIT",
+    "licenseFile": "../LICENSE",
+    "resources": { "../LICENSE": "LICENSE.txt" },
     "shortDescription": "Private dual-track audio recording",
     "windows": {
       "nsis": {

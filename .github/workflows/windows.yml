@@ -1,0 +1,64 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      RUSTUP_TOOLCHAIN: '1.100.0'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install Rust
+        run: rustup toolchain install 1.100.0 --profile minimal --component rustfmt --component clippy
+      - name: Install frontend tooling
+        run: npm ci
+      - name: Check frontend and Rust
+        run: |
+          npm run check
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          cargo clippy --locked --release --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Test recorder
+        run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml
+      - name: Package Windows installer
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+            if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Release tag and app version differ." }
+          }
+          npm run build
+      - name: Install and smoke-test Windows application
+        run: |
+          $installer = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe)
+          if ($installer.Count -ne 1) { throw "Expected one x64 NSIS installer." }
+          ./scripts/smoke-windows.ps1 -Installer $installer[0].FullName
+      - name: Stage versioned distribution files
+        run: |
+          $installer = Get-Item src-tauri/target/release/bundle/nsis/*-setup.exe
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item -LiteralPath $installer.FullName -Destination dist
+          Copy-Item -LiteralPath src-tauri/target/release/nexq-recorder.exe -Destination dist
+          Copy-Item -LiteralPath LICENSE -Destination dist/LICENSE.txt
+          $sha256 = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$sha256  $($installer.Name)" | Set-Content -Encoding ascii "dist/$($installer.Name).sha256"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: nexq-recorder-windows-x64
+          if-no-files-found: error
+          path: dist/
