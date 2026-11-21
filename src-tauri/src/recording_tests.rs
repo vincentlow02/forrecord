@@ -96,11 +96,33 @@ fn writer_fills_a_timed_gap_after_a_dropped_packet() {
     track.fill(segment, ms(130), true, &mut writer).unwrap();
     writer.finish().unwrap();
     assert_eq!(track.captured, 320);
+    assert_eq!(track.silence, 160);
     let samples = read_wav(&path);
     assert_eq!(samples.len(), 480);
     assert!(samples[160..320].iter().all(|&sample| sample == 0));
     assert_ne!(samples[159], 0);
     assert_ne!(samples[320], 0);
+}
+
+#[test]
+fn delayed_packet_fills_the_timeline_before_silence_is_committed() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("late.wav");
+    let mut sink = WavSink::create(&path).unwrap();
+    let mut track = AlignedTrack::new(SAMPLE_RATE);
+    let segment = Segment {
+        start: ms(100),
+        base: 0,
+    };
+    track.pending.push_back(packet(100, 10, 0.25));
+    track.fill(segment, ms(130), false, &mut sink).unwrap();
+    assert_eq!(track.cursor, 160);
+    track.pending.push_back(packet(110, 20, 0.5));
+    track.fill(segment, ms(130), true, &mut sink).unwrap();
+    assert_eq!(track.silence, 0);
+    assert_eq!(track.overlap, 0);
+    sink.finish().unwrap();
+    assert_eq!(read_wav(&path)[160..], vec![16383; 320]);
 }
 
 #[test]
@@ -119,7 +141,7 @@ fn streams_four_hours_into_two_standard_wavs() {
         let mut track = AlignedTrack::new(SAMPLE_RATE);
         for minute in 1..=240 {
             track
-                .fill(segment, Duration::from_secs(minute * 60), false, &mut sink)
+                .fill(segment, Duration::from_secs(minute * 60), true, &mut sink)
                 .unwrap();
         }
         sink.finish().unwrap();
