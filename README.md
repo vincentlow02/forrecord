@@ -34,8 +34,8 @@ npm run build
 
 The frontend is bundled directly from `ui/`. The build writes:
 
-- App: `src-tauri/target/release/nexq-recorder.exe`
-- Installer: `src-tauri/target/release/bundle/nsis/NexQ Recorder_0.1.0_x64-setup.exe`
+- Portable executable at `src-tauri/target/release/nexq-recorder.exe`
+- Offline installer at `src-tauri/target/release/bundle/nsis/NexQ Recorder_0.1.0_x64-setup.exe`
 
 For development use `npm run tauri -- dev`. See [CONTRIBUTING.md](CONTRIBUTING.md) for hardware validation and versioned packaging.
 

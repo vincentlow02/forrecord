@@ -70,7 +70,7 @@ async function evaluate(expression) {
 
 try {
   await eventually(() => evaluate(
-    'window.__TAURI__ && !document.querySelector("#record-button").disabled && document.querySelector("#phase").dataset.state === "idle"'
+    'window.__TAURI__ && document.querySelector("#record-button")?.disabled === false && document.querySelector("#phase").dataset.state === "idle"'
   ), "Recorder controls and IPC did not initialize.");
   const state = await evaluate('window.__TAURI__.core.invoke("recording_status")');
   assert.equal(state.phase, "idle");

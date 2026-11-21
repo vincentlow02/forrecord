@@ -8,10 +8,6 @@ use serde::Serialize;
 use std::collections::VecDeque;
 use std::time::Duration;
 
-#[cfg(test)]
-#[path = "recording_tests.rs"]
-mod tests;
-
 const WRITE_LAG: Duration = Duration::from_millis(250);
 const CHECKPOINT: Duration = Duration::from_secs(5);
 const STALL: Duration = Duration::from_secs(3);
@@ -572,3 +568,7 @@ impl AudioTest {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "recording_tests.rs"]
+mod tests;

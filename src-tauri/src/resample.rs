@@ -150,11 +150,22 @@ mod tests {
             let signal = sine(440.0, rate);
             let output = Resampler::new(rate, 16_000).process_to_i16(&signal);
             assert_eq!(output.len(), 16_000);
-            let crossings = output
+            let steady = &output[200..output.len() - 200];
+            let crossings = steady
                 .windows(2)
                 .filter(|pair| pair[0] <= 0 && pair[1] > 0)
-                .count();
-            assert!(crossings.abs_diff(440) <= 2);
+                .count() as f64;
+            let frequency = crossings * 16_000.0 / steady.len() as f64;
+            assert!(
+                (frequency - 440.0).abs() < 2.0,
+                "{rate} Hz input: {frequency} Hz output"
+            );
+            let energy: f64 = steady
+                .iter()
+                .map(|&sample| (f64::from(sample) / 32_767.0).powi(2))
+                .sum();
+            let rms = (energy / steady.len() as f64).sqrt();
+            assert!((0.69..0.73).contains(&rms), "{rate} Hz input: RMS {rms}");
         }
     }
 

@@ -20,6 +20,9 @@ try {
     $setup = Start-Process -FilePath $Installer -ArgumentList @('/S', "/D=$installation") -PassThru -Wait -WindowStyle Hidden
     if ($setup.ExitCode -ne 0) { throw "NSIS exited with code $($setup.ExitCode)." }
     $Executable = Join-Path $installation 'nexq-recorder.exe'
+    if (!(Test-Path -LiteralPath (Join-Path $installation 'LICENSE.txt') -PathType Leaf)) {
+      throw "The installer omitted LICENSE.txt."
+    }
   }
   $Executable = (Resolve-Path -LiteralPath $Executable).Path
   $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
