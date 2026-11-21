@@ -1,0 +1,16 @@
+/node_modules/
+/target/
+/src-tauri/target/
+/src-tauri/gen/
+/dist/
+/recordings/
+/artifacts/
+*.wav
+*.wav.part
+*.exe
+*.msi
+*.pfx
+*.key
+.env
+.env.*
+*.log
