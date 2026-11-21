@@ -70,7 +70,7 @@ h1 strong { font-weight: 760; }
 .tracks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: clamp(12px, 2.6vw, 42px); margin-top: clamp(26px, 6.65vh, 75px); }
 .track { text-align: left; background: #f6f6f8; border: 1px solid #f0f0f2; border-radius: clamp(19px, 2.85vw, 42px); padding: clamp(14px, 2.65vw, 39px); min-width: 0; display: grid; grid-template-rows: auto 1fr; min-height: clamp(132px, 29.4vh, 310px); }
 .track-header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: clamp(7px, 1.45vw, 25px); }
-.track-icon { width: clamp(23px, 3.3vw, 48px); height: auto; }
+.track-icon { font-size: clamp(23px, 3.3vw, 48px); }
 .track-name h2 { font-size: clamp(17px, 2.55vw, 39px); font-weight: 650; line-height: 1.12; letter-spacing: -.035em; }
 .track-name p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: .35em; font-size: clamp(11px, 1.25vw, 16px); color: var(--muted); }
 .track-name p.issue { color: var(--red-text); }

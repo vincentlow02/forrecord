@@ -11,6 +11,7 @@ use std::time::Duration;
 const WRITE_LAG: Duration = Duration::from_millis(250);
 const CHECKPOINT: Duration = Duration::from_secs(5);
 const STALL: Duration = Duration::from_secs(3);
+const STARTUP_LIMIT: Duration = Duration::from_secs(2);
 const MAX_PENDING: usize = 128;
 const MAX_DURATION: Duration = Duration::from_secs(24 * 60 * 60);
 const ZEROES: [i16; 8192] = [0; 8192];
@@ -100,6 +101,7 @@ pub struct Input {
     source: Source,
     device: Capture,
     last_packet: Duration,
+    packets_seen: u8,
     latest_level: f32,
     pub fault: Option<String>,
 }
@@ -110,6 +112,7 @@ impl Input {
             source,
             device: Capture::open(source, selection)?,
             last_packet: Duration::ZERO,
+            packets_seen: 0,
             latest_level: 0.0,
             fault: None,
         })
@@ -129,6 +132,7 @@ impl Input {
                 continue;
             }
             self.last_packet = now;
+            self.packets_seen = self.packets_seen.saturating_add(1);
             let square_sum = packet.samples.iter().map(|x| x * x).sum::<f32>();
             level = level.max((square_sum / packet.samples.len() as f32).sqrt());
             overflow |= !enqueue(packet);
@@ -282,20 +286,18 @@ pub struct Recording {
 impl Recording {
     pub fn start(mut inputs: [Input; 2], root: &std::path::Path, clock: &Clock) -> Result<Self> {
         let mut files = SessionFiles::create(root, [inputs[0].info(0), inputs[1].info(1)])?;
-        let now = clock.now();
-        for input in &mut inputs {
-            if let Err(error) = input.play(now) {
-                let folder = files.folder.clone();
-                drop(files);
-                let _ = std::fs::remove_dir_all(folder);
-                return Err(error.into());
-            }
+        if let Err(error) = wait_for_audio(&mut inputs, clock) {
+            let folder = files.folder.clone();
+            drop(files);
+            let _ = std::fs::remove_dir_all(folder);
+            return Err(error.into());
         }
-        let start = clock.now();
-        files.session.started_at = Utc::now();
         let aligned = inputs
             .each_ref()
             .map(|input| AlignedTrack::new(input.device.rate));
+        let previous_gaps = inputs.each_ref().map(|input| input.device.health.gaps());
+        let start = clock.now();
+        files.session.started_at = Utc::now();
         let mut timeline = Timeline::default();
         timeline.resume(start);
         Ok(Self {
@@ -305,7 +307,7 @@ impl Recording {
             timeline,
             next_checkpoint: start + CHECKPOINT,
             gaps: [0; 2],
-            previous_gaps: [0; 2],
+            previous_gaps,
             last_tick: start,
         })
     }
@@ -551,6 +553,35 @@ pub struct AudioTest {
     pub inputs: [Option<Input>; 2],
     pub errors: [Option<String>; 2],
     pub expires: Duration,
+}
+
+fn wait_for_audio(inputs: &mut [Input; 2], clock: &Clock) -> std::result::Result<(), String> {
+    let deadline = clock.now() + STARTUP_LIMIT;
+    for input in inputs.iter_mut() {
+        input.play(clock.now())?;
+    }
+    // Establish a shared start after both WASAPI endpoints are delivering data.
+    // Packets received during device initialization are discarded.
+    loop {
+        let now = clock.now();
+        for input in inputs.iter_mut() {
+            input.poll(now, |_| true);
+            if let Some(fault) = &input.fault {
+                return Err(fault.clone());
+            }
+        }
+        let waiting = inputs.iter().find(|input| input.packets_seen < 2);
+        match waiting {
+            None => return Ok(()),
+            Some(input) if now >= deadline => {
+                return Err(format!(
+                    "{} did not deliver audio. Check the selected device in Settings.",
+                    input.source.label()
+                ));
+            }
+            Some(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
 }
 
 impl AudioTest {
