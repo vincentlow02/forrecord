@@ -15,7 +15,7 @@ Rust tests cover sample formats, resampling, pause boundaries, aligned WAVs, sil
 
 ```powershell
 cargo test --release --locked --manifest-path src-tauri/Cargo.toml streams_four_hours_into_two_standard_wavs -- --ignored
-./scripts/smoke-windows.ps1 -Executable ./src-tauri/target/release/nexq-recorder.exe
+./scripts/smoke-windows.ps1 -Executable ./src-tauri/target/release/nexq-recorder.exe -LibraryFixture
 ```
 
 ## Hardware checks
@@ -31,4 +31,6 @@ Use test audio in shared reports. Keep any real recordings, personal settings, a
 
 ## Windows release
 
-Set the same version in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json`. The Windows workflow packages `main` and version tags, validates installation and the installed WebView, then uploads the installer, SHA-256 checksum, and portable executable to the Actions run. Use the green build for the release assets. Include the hardware checks performed, any gaps, and the unsigned installer status in the release notes.
+Set the same version in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json`. The Windows workflow packages pull requests, `main`, and version tags. It validates the installed WebView, Start Menu shortcut, uninstall, reinstall, and playback of retained audio before uploading both executables, the license, and SHA-256 checksums. Run installer smoke tests under a Windows account without an existing NexQ installation.
+
+Tag the verified release commit and use the successful tag build for release assets. Include the code-signing status and hardware coverage in the notes. Publish as a prerelease while essential device checks remain open.

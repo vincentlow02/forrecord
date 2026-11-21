@@ -59,7 +59,7 @@ function command(method, params = {}) {
 
 async function evaluate(expression) {
   const response = await command("Runtime.evaluate", {
-    expression, returnByValue: true, awaitPromise: true,
+    expression, returnByValue: true, awaitPromise: true, userGesture: true,
   });
   if (response.exceptionDetails) {
     const { exception, text } = response.exceptionDetails;
@@ -100,18 +100,53 @@ try {
   }
   await evaluate('document.querySelector("#settings-button").click()');
   await eventually(() => evaluate(
-    'document.querySelector("#settings-dialog").open && Boolean(document.querySelector("#recordings-folder").value)'
-  ), "Settings dialog did not load actual recording preferences.");
+    '!document.querySelector("#settings-view").hidden && Boolean(document.querySelector("#recordings-folder").value)'
+  ), "Settings view did not load actual recording preferences.");
   assert.equal(await evaluate('document.querySelector("#mic-device").options[0].text'), "Windows default");
-  await evaluate('document.querySelector("#settings-dialog").close()');
+  await assert.rejects(
+    evaluate('window.__TAURI__.core.invoke("save_preferences", { microphone: null, output: null, folder: "C:/Windows" })'),
+    /Use Browse/
+  );
   await evaluate('document.querySelector("#history-button").click()');
   await eventually(() => evaluate(`(() => {
-    const dialog = document.querySelector("#history-dialog");
+    const view = document.querySelector("#library-view");
     const notice = document.querySelector("#history-notice");
-    return dialog.open && notice.textContent !== "Loading recordings…";
-  })()`), "History dialog did not load.");
+    return !view.hidden && notice.textContent !== "Loading recordings…";
+  })()`), "Recording Library did not load.");
   assert.equal(await evaluate('document.querySelector("#history-notice").classList.contains("error")'), false);
-  console.log("Packaged WebView, Rust IPC, recorder layout, Settings and History passed.");
+  const fixture = process.env.NEXQ_SMOKE_FIXTURE;
+  if (fixture) {
+    const selector = JSON.stringify(`#recording-${fixture}`);
+    await evaluate(`(() => {
+      const field = document.querySelector("#library-search");
+      field.value = "NexQ QA legacy";
+      field.dispatchEvent(new Event("input"));
+    })()`);
+    assert.equal(await evaluate('document.querySelectorAll(".history-item").length'), 1);
+    await evaluate(`document.querySelector(${selector}).click()`);
+    assert.equal(await evaluate(`document.querySelector(${selector}).getAttribute("aria-expanded")`), "true");
+    assert.match(await evaluate('document.querySelector(".library-details").innerText'), /Export Interviewer.*Export Me/s);
+    await evaluate(`(() => {
+      document.querySelector("audio").muted = true;
+      document.querySelector('[aria-label="Preview Interviewer"]').click();
+    })()`);
+    await eventually(() => evaluate('document.querySelector("audio").duration === 44'),
+      "The installed WebView did not load the original WAV track.");
+    const first = await evaluate('document.querySelector("audio").src');
+    await evaluate('document.querySelector("audio").currentTime = 40');
+    await eventually(() => evaluate(`(() => {
+      const audio = document.querySelector("audio");
+      return audio.currentTime >= 39.5 && audio.readyState >= 2 && !audio.seeking;
+    })()`), "Playback could not seek beyond the first audio chunk.");
+    await evaluate(`document.querySelector('[aria-label="Preview Me"]').click()`);
+    await eventually(() => evaluate(`(() => {
+      const audio = document.querySelector("audio");
+      return audio.duration === 44 && audio.src !== ${JSON.stringify(first)};
+    })()`), "Switching to the microphone track did not load its WAV.");
+    await evaluate('document.querySelector("#recorder-button").click()');
+    assert.equal(await evaluate('Boolean(document.querySelector("audio"))'), false);
+  }
+  console.log("Packaged WebView, Rust IPC, recorder layout, Settings and Recording Library passed.");
 } finally {
   socket.close();
 }
