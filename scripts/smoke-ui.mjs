@@ -24,7 +24,7 @@ const target = await eventually(async () => {
   } catch {
     return null;
   }
-}, "NexQ Recorder WebView did not start.", 25_000);
+}, "NexQ Recorder WebView did not start.", 60_000);
 
 const socket = new WebSocket(target.webSocketDebuggerUrl);
 await new Promise((resolve, reject) => {

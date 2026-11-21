@@ -31,11 +31,23 @@ try {
   $listener.Stop()
   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-address=127.0.0.1 --remote-debugging-port=$port"
   $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $scratch 'webview'
-  $app = Start-Process -FilePath $Executable -PassThru -WindowStyle Hidden
+  $stdout = Join-Path $scratch 'app.stdout.log'
+  $stderr = Join-Path $scratch 'app.stderr.log'
+  $app = Start-Process -FilePath $Executable -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
   $smokeArguments = @((Join-Path $PSScriptRoot 'smoke-ui.mjs'), $port)
   if ($Screenshot) { $smokeArguments += $Screenshot }
   & node @smokeArguments
-  if ($LASTEXITCODE -ne 0) { throw "NexQ Recorder UI smoke test failed." }
+  if ($LASTEXITCODE -ne 0) {
+    $runtimePaths = @(
+      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+      'HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    )
+    $versions = Get-ItemPropertyValue -LiteralPath $runtimePaths -Name pv -ErrorAction SilentlyContinue
+    Write-Host "WebView2 Runtime $($versions -join ', '). App exited $($app.HasExited)."
+    if ($app.HasExited) { Write-Host "App exit code $($app.ExitCode)." }
+    Get-Content -LiteralPath $stdout,$stderr -Tail 20
+    throw "NexQ Recorder UI smoke test failed."
+  }
   $null = $app.CloseMainWindow()
   if (!$app.WaitForExit(8000)) { throw "NexQ Recorder did not close cleanly." }
   if ($app.ExitCode -ne 0) { throw "NexQ Recorder exited with code $($app.ExitCode)." }

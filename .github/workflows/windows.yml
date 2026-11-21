@@ -12,7 +12,8 @@ permissions:
 
 jobs:
   windows:
-    runs-on: windows-2025
+    # Keep WebView2 automation on the runner recommended in actions/runner-images#14738.
+    runs-on: windows-2022
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: 2
