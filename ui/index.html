@@ -23,16 +23,16 @@
   </svg>
 
   <header class="topbar">
-    <h1><strong>NexQ</strong> Recorder</h1>
-    <div class="top-actions">
-      <span class="privacy"><svg><use href="#icon-lock"/></svg><span>Local only</span></span>
-      <span class="divider" aria-hidden="true"></span>
-      <button id="history-button" class="icon-button" aria-label="Recording history" title="Recording history"><svg><use href="#icon-library"/></svg></button>
-      <button id="settings-button" class="icon-button" aria-label="Settings" title="Settings"><svg><use href="#icon-settings"/></svg></button>
-    </div>
+    <h1><strong>NexQ</strong><span class="brand-suffix"> Recorder</span></h1>
+    <nav class="navigation" aria-label="Main navigation">
+      <button id="recorder-button" data-view="recorder" aria-current="page">Recorder</button>
+      <button id="history-button" data-view="library">Recordings</button>
+      <button id="settings-button" data-view="settings">Settings</button>
+    </nav>
+    <span class="privacy"><svg aria-hidden="true"><use href="#icon-lock"/></svg><span>Local only</span></span>
   </header>
 
-  <main class="recorder" aria-label="Recorder">
+  <main id="recorder-view" class="recorder" aria-label="Recorder">
     <section class="clock" aria-label="Session">
       <div id="phase" class="phase" data-state="idle" role="status"><span class="phase-dot"></span><span id="phase-text">Ready</span></div>
       <time id="session-time" class="session-time" aria-label="Session time">00:00:00</time>
@@ -60,15 +60,15 @@
       <button id="record-button" class="record-button" aria-label="Start recording" title="Start recording" disabled><svg><use href="#icon-mic"/></svg></button>
       <button id="bookmark-button" class="transport-side" aria-label="Add bookmark" title="Add bookmark" hidden><svg><use href="#icon-bookmark"/></svg></button>
     </div>
-    <p id="notice" class="notice" aria-live="polite"></p>
+    <div class="recorder-feedback">
+      <p id="notice" class="notice" aria-live="polite"></p>
+      <button id="view-recording" class="button" hidden>View Recording</button>
+    </div>
   </main>
 
-  <dialog id="settings-dialog" aria-labelledby="settings-heading">
-    <div class="dialog-header">
-      <h2 id="settings-heading">Settings</h2>
-      <button type="button" class="icon-button dialog-close" aria-label="Close settings"><svg><use href="#icon-close"/></svg></button>
-    </div>
-    <form id="settings-form">
+  <main id="settings-view" class="page settings-view" aria-labelledby="settings-heading" hidden>
+    <h2 id="settings-heading" class="page-title" tabindex="-1">Settings</h2>
+    <form id="settings-form" class="settings-form">
       <p id="settings-notice" class="dialog-notice" role="status"></p>
       <div class="setting">
         <label for="output-device">Interviewer <span>System audio</span></label>
@@ -96,16 +96,29 @@
         <button type="submit" id="save-settings" class="button dark">Save settings</button>
       </div>
     </form>
-  </dialog>
+  </main>
 
-  <dialog id="history-dialog" class="history-dialog" aria-labelledby="history-heading">
-    <div class="dialog-header">
-      <h2 id="history-heading">Recordings</h2>
-      <button type="button" class="icon-button dialog-close" aria-label="Close history"><svg><use href="#icon-close"/></svg></button>
+  <main id="library-view" class="page library-view" aria-labelledby="history-heading" hidden>
+    <div class="library-title">
+      <h2 id="history-heading" class="page-title" tabindex="-1">Recordings</h2>
+      <p id="library-count" class="muted"></p>
     </div>
-    <p id="history-notice" class="dialog-notice" role="status"></p>
+    <div class="library-filters">
+      <input id="library-search" type="search" placeholder="Search recordings" aria-label="Search recordings">
+      <select id="library-sort" aria-label="Sort recordings">
+        <option value="newest">Newest first</option>
+        <option value="oldest">Oldest first</option>
+        <option value="longest">Longest first</option>
+        <option value="shortest">Shortest first</option>
+      </select>
+    </div>
+    <div class="library-status">
+      <p id="history-notice" class="dialog-notice" role="status"></p>
+      <button id="history-retry" class="button" hidden>Retry</button>
+    </div>
+    <p id="history-empty" class="library-empty" role="status" hidden></p>
     <div id="history-list" class="history-list"></div>
-  </dialog>
+  </main>
 
   <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title">
     <form method="dialog" id="confirm-form">

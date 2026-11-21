@@ -1,7 +1,8 @@
+import { formatDuration, trackLabels } from "./library-core.js";
+import { library } from "./library.js";
+
 const $ = (id) => document.getElementById(id);
 const invoke = (command, args) => window.__TAURI__.core.invoke(command, args);
-const sampleRate = 16_000;
-const trackLabels = ["Interviewer", "Me"];
 const trackHints = ["System audio", "Microphone"];
 const states = {
   idle: "Ready",
@@ -11,12 +12,9 @@ const states = {
   interrupted: "Recording interrupted",
   testing: "Testing devices",
 };
-const formatDate = new Intl.DateTimeFormat(undefined, {
-  dateStyle: "medium",
-  timeStyle: "short",
-});
 
 let snapshot = { phase: "idle", frames: 0, tracks: [] };
+let currentView = "recorder";
 let ready = false;
 let busy = false;
 let revision = 0;
@@ -25,11 +23,7 @@ let pendingError = "";
 let lastMessage = "";
 const isActive = () => ["recording", "paused"].includes(snapshot.phase);
 
-function formatDuration(frames, rate = sampleRate) {
-  const seconds = Math.floor(frames / rate);
-  return [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60]
-    .map((value) => String(value).padStart(2, "0")).join(":");
-}
+const navigation = [...document.querySelectorAll("[data-view]")];
 
 function buttonLabel(button, label, icon) {
   button.setAttribute("aria-label", label);
@@ -73,8 +67,9 @@ function render() {
   if ($("phase-text").textContent !== status) $("phase-text").textContent = status;
   $("session-time").textContent = formatDuration(frames);
   $("record-button").disabled = busy || !ready;
-  $("history-button").disabled = active || busy || !ready;
-  $("settings-button").disabled = active || busy || !ready;
+  for (const link of navigation) {
+    link.disabled = link.dataset.view !== currentView && (active || busy || !ready);
+  }
   buttonLabel($("record-button"), active ? "Stop and save" : "Start recording", active ? "stop" : "mic");
   $("pause-button").hidden = !active;
   $("bookmark-button").hidden = !active;
@@ -86,7 +81,7 @@ function render() {
   for (let i = 0; i < trackLabels.length; i++) {
     const track = phase === "testing" ? undefined : tracks[i];
     timers[i].textContent = formatDuration(track?.frames ?? 0);
-    deviceLabels[i].textContent = track?.issue || trackHints[i];
+    deviceLabels[i].textContent = track?.issue || (active ? track?.device : null) || trackHints[i];
     deviceLabels[i].title = track?.issue || track?.device || trackHints[i];
     deviceLabels[i].classList.toggle("issue", Boolean(track?.issue));
     updateWave(i, track?.level ?? 0);
@@ -98,6 +93,7 @@ function render() {
   }
   notice($("notice"), pendingError || message || (phase === "saved" ? "Both WAV tracks are in Recordings." : ""),
     Boolean(pendingError || message));
+  $("view-recording").hidden = !snapshot.sessionId || active || busy;
   renderDeviceTest();
 }
 
@@ -144,14 +140,37 @@ $("record-button").addEventListener("click", () => record(isActive() ? "stop" : 
 $("pause-button").addEventListener("click", () => record(snapshot.phase === "paused" ? "resume" : "pause"));
 $("bookmark-button").addEventListener("click", () => record("bookmark"));
 
-const settings = $("settings-dialog");
-const history = $("history-dialog");
-const confirmDialog = $("confirm-dialog");
-for (const dialog of [settings, history]) {
-  dialog.querySelector(".dialog-close").addEventListener("click", () => dialog.close());
+async function navigate(view, sessionId) {
+  if (view === currentView || busy || settingsBusy || library.busy || isActive()) return;
+  if (currentView === "library") library.close();
+  if (currentView === "settings" && snapshot.phase === "testing") {
+    try { snapshot = await invoke("recording_action", { action: "end_test" }); }
+    catch (error) { pendingError = String(error); }
+  }
+  currentView = view;
+  for (const link of navigation) {
+    $(`${link.dataset.view}-view`).hidden = link.dataset.view !== view;
+    if (link.dataset.view === view) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+  window.scrollTo(0, 0);
+  if (view === "library") {
+    $("history-heading").focus();
+    await library.open(sessionId);
+  } else if (view === "settings") {
+    $("settings-heading").focus();
+    await loadPreferences();
+  } else {
+    $("record-button").focus();
+  }
+  render();
 }
 
+for (const link of navigation) link.addEventListener("click", () => navigate(link.dataset.view));
+$("view-recording").addEventListener("click", () => navigate("library", snapshot.sessionId));
+
 let settingsBusy = false;
+let pendingFolder = null;
 const settingsNotice = $("settings-notice");
 const preferenceControls = ["output-device", "mic-device", "browse-folder", "test-button", "save-settings"];
 function lockSettings(locked) {
@@ -171,6 +190,7 @@ function deviceOptions(select, devices, selected) {
   select.value = selected ?? "";
 }
 function setPreferences(data) {
+  pendingFolder = null;
   deviceOptions($("output-device"), data.outputs, data.output);
   deviceOptions($("mic-device"), data.microphones, data.microphone);
   $("recordings-folder").value = data.folder;
@@ -197,23 +217,23 @@ function renderDeviceTest() {
   }
 }
 
-$("settings-button").addEventListener("click", async () => {
+async function loadPreferences() {
   lockSettings(true);
-  settings.showModal();
   notice(settingsNotice, "Loading devices…");
   try {
     setPreferences(await invoke("preferences"));
   } catch (error) {
     notice(settingsNotice, String(error), true);
-    return;
+  } finally {
+    lockSettings(false);
   }
-  lockSettings(false);
-});
+}
 $("browse-folder").addEventListener("click", async () => {
   lockSettings(true);
   try {
-    const folder = await invoke("choose_folder", { title: "Choose a recordings folder" });
+    const folder = await invoke("choose_folder");
     if (folder) {
+      pendingFolder = folder;
       $("recordings-folder").value = folder;
       $("recordings-folder").title = folder;
       $("free-space").textContent = "Save settings to use this folder.";
@@ -231,10 +251,10 @@ $("settings-form").addEventListener("submit", async (event) => {
   try {
     const data = await invoke("save_preferences", {
       ...selection(),
-      folder: $("recordings-folder").value,
+      folder: pendingFolder,
     });
     setPreferences(data);
-    settings.close();
+    notice(settingsNotice, "Settings saved.");
   } catch (error) {
     notice(settingsNotice, String(error), true);
   } finally {
@@ -248,7 +268,7 @@ $("test-button").addEventListener("click", async () => {
     snapshot = snapshot.phase === "testing"
       ? await invoke("recording_action", { action: "end_test" })
       : await invoke("test_devices", selection());
-    if (!settings.open && snapshot.phase === "testing") {
+    if (currentView !== "settings" && snapshot.phase === "testing") {
       snapshot = await invoke("recording_action", { action: "end_test" });
     }
     render();
@@ -258,128 +278,5 @@ $("test-button").addEventListener("click", async () => {
     lockSettings(false);
   }
 });
-settings.addEventListener("close", () => {
-  if (snapshot.phase === "testing") {
-    invoke("recording_action", { action: "end_test" }).catch((error) => notice($("notice"), String(error), true));
-  }
-});
-
-const historyNotice = $("history-notice");
-const historyList = $("history-list");
-let historyBusy = false;
-function itemText(tag, className, text) {
-  const element = document.createElement(tag);
-  element.className = className;
-  element.textContent = text;
-  return element;
-}
-function actionButton(label, onClick, style = "") {
-  const button = itemText("button", `button ${style}`, label);
-  button.type = "button";
-  button.addEventListener("click", onClick);
-  return button;
-}
-function historyItem(session) {
-  const card = itemText("article", "history-item", "");
-  const date = formatDate.format(new Date(session.startedAt));
-  const duration = formatDuration(session.durationFrames, session.sampleRate);
-  const metadata = [date, duration];
-  if (session.state === "recovered") metadata.push("Recovered");
-  if (session.state === "interrupted") metadata.push("Interrupted");
-  if (session.bookmarks.length) {
-    metadata.push(`Bookmarks ${session.bookmarks.map((frame) => formatDuration(frame, session.sampleRate)).join(", ")}`);
-  }
-  card.append(itemText("h3", "", session.name), itemText("p", "muted", metadata.join(" · ")));
-  const issues = [...session.issues];
-  for (const [index, track] of session.tracks.entries()) {
-    if (track.discontinuities) issues.push(`${trackLabels[index]} reported ${track.discontinuities} audio gaps`);
-  }
-  if (issues.length) card.append(itemText("p", "muted capture-issue", issues.join(" · ")));
-  const actions = itemText("div", "history-actions", "");
-  actions.append(
-    actionButton("Play Interviewer", () => fileAction(session, { kind: "play", track: 0 })),
-    actionButton("Play Me", () => fileAction(session, { kind: "play", track: 1 })),
-    actionButton("Open folder", () => fileAction(session, { kind: "open_folder" })),
-    actionButton("Rename", () => fileAction(session, { kind: "rename" })),
-    actionButton("Export", () => fileAction(session, { kind: "export" })),
-    actionButton("Delete", () => fileAction(session, { kind: "delete" }), "delete"),
-  );
-  card.append(actions);
-  return card;
-}
-
-async function loadHistory() {
-  const { sessions, warnings } = await invoke("list_recordings");
-  historyList.replaceChildren(...sessions.map(historyItem));
-  const info = warnings.join(" · ") || (sessions.length ? "" : "Your saved recordings will appear here.");
-  notice(historyNotice, info, Boolean(warnings.length));
-}
-
-function confirmAction(session, rename) {
-  const nameInput = $("confirm-name");
-  const action = $("confirm-action");
-  $("confirm-title").textContent = rename ? "Rename recording" : "Delete recording?";
-  $("confirm-copy").textContent = rename ? "" : `“${session.name}” and its files will be permanently deleted.`;
-  $("confirm-copy").hidden = rename;
-  nameInput.value = rename ? session.name : "";
-  nameInput.hidden = !rename;
-  nameInput.required = rename;
-  action.classList.toggle("danger", !rename);
-  action.textContent = rename ? "Rename" : "Delete";
-  confirmDialog.returnValue = "";
-  return new Promise((resolve) => {
-    confirmDialog.addEventListener("close", () => {
-      resolve(confirmDialog.returnValue === "confirm" ? (rename ? nameInput.value : true) : null);
-    }, { once: true });
-    confirmDialog.showModal();
-    if (rename) {
-      nameInput.focus();
-      nameInput.select();
-    } else {
-      $("confirm-form").querySelector("[value=cancel]").focus();
-    }
-  });
-}
-
-async function fileAction(session, action) {
-  if (historyBusy) return;
-  historyBusy = true;
-  try {
-    if (action.kind === "rename") {
-      const name = await confirmAction(session, true);
-      if (!name) return;
-      action.name = name;
-    } else if (action.kind === "delete") {
-      if (!await confirmAction(session, false)) return;
-    } else if (action.kind === "export") {
-      const destination = await invoke("choose_folder", { title: "Choose where to copy the recording" });
-      if (!destination) return;
-      action.destination = destination;
-      notice(historyNotice, "Copying WAV files…");
-    }
-    const location = await invoke("recording_file_action", { id: session.id, action });
-    if (action.kind === "rename" || action.kind === "delete") await loadHistory();
-    if (location) notice(historyNotice, `Exported to ${location}`);
-  } catch (error) {
-    notice(historyNotice, String(error), true);
-  } finally {
-    historyBusy = false;
-  }
-}
-$("history-button").addEventListener("click", async () => {
-  if (historyBusy) return;
-  historyBusy = true;
-  historyList.replaceChildren();
-  notice(historyNotice, "Loading recordings…");
-  history.showModal();
-  try {
-    await loadHistory();
-  } catch (error) {
-    notice(historyNotice, String(error), true);
-  } finally {
-    historyBusy = false;
-  }
-});
-
 render();
 poll();

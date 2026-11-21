@@ -6,7 +6,7 @@ use cpal::{FromSample, SampleFormat, SizedSample};
 use serde::Serialize;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::time::Duration;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
@@ -100,16 +100,52 @@ pub struct Packet {
     pub samples: Vec<f32>,
 }
 
+#[derive(Clone, Copy, Default, serde::Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureEvents {
+    pub driver_xruns: u32,
+    pub render_xruns: u32,
+    pub timestamp_estimates: u32,
+    pub dropped_source_frames: u64,
+}
+
+impl CaptureEvents {
+    pub fn accumulate(&mut self, current: Self, previous: Self) {
+        self.driver_xruns += current.driver_xruns.wrapping_sub(previous.driver_xruns);
+        self.render_xruns += current.render_xruns.wrapping_sub(previous.render_xruns);
+        self.timestamp_estimates += current
+            .timestamp_estimates
+            .wrapping_sub(previous.timestamp_estimates);
+        self.dropped_source_frames += current
+            .dropped_source_frames
+            .wrapping_sub(previous.dropped_source_frames);
+    }
+
+    pub fn warnings(self) -> u32 {
+        self.driver_xruns
+            .saturating_add(self.render_xruns)
+            .saturating_add(self.timestamp_estimates)
+    }
+}
+
 #[derive(Default)]
 pub struct Health {
     fault: Mutex<Option<String>>,
-    gaps: AtomicU32,
+    driver_xruns: AtomicU32,
+    render_xruns: AtomicU32,
+    timestamp_estimates: AtomicU32,
+    dropped_source_frames: AtomicU64,
 }
 
 impl Health {
-    fn report(&self, error: cpal::Error) {
+    fn report(&self, error: cpal::Error, render: bool) {
         if error.kind() == cpal::ErrorKind::Xrun {
-            self.gaps.fetch_add(1, Ordering::Relaxed);
+            let count = if render {
+                &self.render_xruns
+            } else {
+                &self.driver_xruns
+            };
+            count.fetch_add(1, Ordering::Relaxed);
         } else {
             self.fault
                 .lock()
@@ -122,8 +158,13 @@ impl Health {
         self.fault.lock().unwrap().clone()
     }
 
-    pub fn gaps(&self) -> u32 {
-        self.gaps.load(Ordering::Relaxed)
+    pub fn events(&self) -> CaptureEvents {
+        CaptureEvents {
+            driver_xruns: self.driver_xruns.load(Ordering::Relaxed),
+            render_xruns: self.render_xruns.load(Ordering::Relaxed),
+            timestamp_estimates: self.timestamp_estimates.load(Ordering::Relaxed),
+            dropped_source_frames: self.dropped_source_frames.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -249,18 +290,22 @@ where
                 || at > callback + Duration::from_millis(100)
                 || callback.saturating_sub(at) > Duration::from_secs(2)
             {
-                callback_health.gaps.fetch_add(1, Ordering::Relaxed);
+                callback_health
+                    .timestamp_estimates
+                    .fetch_add(1, Ordering::Relaxed);
                 at = callback
                     .saturating_sub(duration)
                     .max(last_end.min(callback));
             }
             last_end = at + duration;
             let samples = downmix_to_mono_f32(data, config.channels);
-            if let Err(TrySendError::Full(_)) = sink.try_send(Packet { at, samples }) {
-                callback_health.gaps.fetch_add(1, Ordering::Relaxed);
+            if let Err(TrySendError::Full(packet)) = sink.try_send(Packet { at, samples }) {
+                callback_health
+                    .dropped_source_frames
+                    .fetch_add(packet.samples.len() as u64, Ordering::Relaxed);
             }
         },
-        move |error| health.report(error),
+        move |error| health.report(error, false),
         None,
     )
 }
@@ -273,7 +318,25 @@ fn render_stream<T: SizedSample>(
     device.build_output_stream::<T, _, _>(
         config,
         |data, _| data.fill(T::EQUILIBRIUM),
-        move |error| health.report(error),
+        move |error| health.report(error, true),
         None,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn driver_and_render_xruns_are_not_reported_as_lost_frames() {
+        let health = Health::default();
+        health.report(cpal::ErrorKind::Xrun.into(), false);
+        health.report(cpal::ErrorKind::Xrun.into(), true);
+        let events = health.events();
+        assert_eq!(events.driver_xruns, 1);
+        assert_eq!(events.render_xruns, 1);
+        assert_eq!(events.dropped_source_frames, 0);
+        assert_eq!(events.timestamp_estimates, 0);
+        assert!(health.fault().is_none());
+    }
 }

@@ -1,7 +1,8 @@
-use crate::capture::{Capture, Clock, Packet, Source};
+use crate::capture::{Capture, CaptureEvents, Clock, Packet, Source};
 use crate::resample::Resampler;
 use crate::storage::{
-    Pause, Result, SAMPLE_RATE, SaveState, Session, SessionFiles, TRACK_FILES, TrackInfo, WavSink,
+    Pause, Result, SAMPLE_RATE, SaveState, Session, SessionFiles, TRACK_FILES, TrackDiagnostics,
+    TrackInfo, WavSink,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -95,6 +96,7 @@ pub struct Snapshot {
     pub tracks: [TrackStatus; 2],
     pub message: Option<String>,
     pub bookmarks: usize,
+    pub session_id: Option<String>,
 }
 
 pub struct Input {
@@ -156,7 +158,12 @@ impl Input {
         }
     }
 
-    pub fn status(&self, frames: u64, show_levels: bool, gaps: u32) -> TrackStatus {
+    pub fn status(
+        &self,
+        frames: u64,
+        show_levels: bool,
+        diagnostics: TrackDiagnostics,
+    ) -> TrackStatus {
         TrackStatus {
             frames,
             level: if show_levels && self.fault.is_none() {
@@ -165,10 +172,22 @@ impl Input {
                 0.0
             },
             device: Some(self.device.device.name.clone()),
-            issue: self
-                .fault
-                .clone()
-                .or_else(|| (gaps > 0).then(|| format!("{gaps} capture gaps reported"))),
+            issue: self.fault.clone().or_else(|| {
+                let events = diagnostics.events;
+                let warnings = events.warnings();
+                if events.dropped_source_frames > 0 {
+                    Some(format!(
+                        "{} input frames dropped by the buffer",
+                        events.dropped_source_frames
+                    ))
+                } else if warnings > 0 {
+                    Some(format!("{warnings} capture timing warnings"))
+                } else if diagnostics.silence_frames >= u64::from(SAMPLE_RATE) / 10 {
+                    Some("Missing audio padded with silence".to_owned())
+                } else {
+                    None
+                }
+            }),
         }
     }
 
@@ -182,6 +201,7 @@ impl Input {
             captured_frames: 0,
             last_capture_frame: 0,
             discontinuities: 0,
+            diagnostics: Some(TrackDiagnostics::default()),
         }
     }
 }
@@ -193,6 +213,8 @@ struct AlignedTrack {
     cursor: u64,
     last_audio: u64,
     captured: u64,
+    silence: u64,
+    overlap: u64,
 }
 
 impl AlignedTrack {
@@ -204,6 +226,8 @@ impl AlignedTrack {
             cursor: 0,
             last_audio: 0,
             captured: 0,
+            silence: 0,
+            overlap: 0,
         }
     }
 
@@ -212,6 +236,7 @@ impl AlignedTrack {
             let count = (end - self.cursor).min(ZEROES.len() as u64) as usize;
             sink.write(&ZEROES[..count])?;
             self.cursor += count as u64;
+            self.silence += count as u64;
         }
         Ok(())
     }
@@ -257,8 +282,19 @@ impl AlignedTrack {
                 self.silence_to(offset.min(end), sink)?;
                 self.resampler.reset();
             }
+            if !contiguous
+                && nominal < self.cursor
+                && nominal
+                    .saturating_add(frames(frame_duration(last - first, self.rate), SAMPLE_RATE))
+                    <= self.cursor
+            {
+                // A wholly stale packet must not seed the filter used by the next packet.
+                self.overlap += frames(frame_duration(last - first, self.rate), SAMPLE_RATE);
+                continue;
+            }
             let data = self.resampler.process_to_i16(&packet.samples[first..last]);
             let skip = self.cursor.saturating_sub(offset).min(data.len() as u64) as usize;
+            self.overlap += skip as u64;
             let count = (end - self.cursor).min((data.len() - skip) as u64) as usize;
             if count > 0 {
                 sink.write(&data[skip..skip + count])?;
@@ -267,7 +303,11 @@ impl AlignedTrack {
                 self.captured += count as u64;
             }
         }
-        self.silence_to(end, sink)?;
+        // With no later packet there is no evidence of a trailing gap yet. Keep
+        // that timeline range unwritten so a delayed callback can still fill it.
+        if closing || !self.pending.is_empty() {
+            self.silence_to(end, sink)?;
+        }
         Ok(())
     }
 }
@@ -278,8 +318,8 @@ pub struct Recording {
     files: SessionFiles,
     timeline: Timeline,
     next_checkpoint: Duration,
-    gaps: [u32; 2],
-    previous_gaps: [u32; 2],
+    events: [CaptureEvents; 2],
+    previous_events: [CaptureEvents; 2],
     last_tick: Duration,
 }
 
@@ -295,7 +335,7 @@ impl Recording {
         let aligned = inputs
             .each_ref()
             .map(|input| AlignedTrack::new(input.device.rate));
-        let previous_gaps = inputs.each_ref().map(|input| input.device.health.gaps());
+        let previous_events = inputs.each_ref().map(|input| input.device.health.events());
         let start = clock.now();
         files.session.started_at = Utc::now();
         let mut timeline = Timeline::default();
@@ -306,8 +346,8 @@ impl Recording {
             files,
             timeline,
             next_checkpoint: start + CHECKPOINT,
-            gaps: [0; 2],
-            previous_gaps,
+            events: [CaptureEvents::default(); 2],
+            previous_events,
             last_tick: start,
         })
     }
@@ -324,12 +364,11 @@ impl Recording {
                 track.pending.push_back(packet);
                 true
             });
-            let total = input.device.health.gaps();
+            let total = input.device.health.events();
             if active {
-                self.gaps[index] = self.gaps[index]
-                    .saturating_add(total.saturating_sub(self.previous_gaps[index]));
+                self.events[index].accumulate(total, self.previous_events[index]);
             }
-            self.previous_gaps[index] = total;
+            self.previous_events[index] = total;
         }
     }
 
@@ -422,12 +461,22 @@ impl Recording {
     fn update_metadata(&mut self) {
         self.files.session.duration_frames =
             self.aligned.iter().map(|track| track.cursor).min().unwrap();
+        let diagnostics = self.diagnostics();
         for (index, track) in self.aligned.iter().enumerate() {
             let info = &mut self.files.session.tracks[index];
             info.last_capture_frame = track.last_audio;
             info.captured_frames = track.captured;
-            info.discontinuities = self.gaps[index];
+            info.discontinuities = self.events[index].driver_xruns;
+            info.diagnostics = Some(diagnostics[index]);
         }
+    }
+
+    fn diagnostics(&self) -> [TrackDiagnostics; 2] {
+        std::array::from_fn(|i| TrackDiagnostics {
+            events: self.events[i],
+            silence_frames: self.aligned[i].silence,
+            overlap_frames: self.aligned[i].overlap,
+        })
     }
 
     fn checkpoint(&mut self) -> Result<()> {
@@ -441,6 +490,7 @@ impl Recording {
     pub fn snapshot(&self, now: Duration) -> Snapshot {
         let frames = self.timeline.duration(now);
         let active = self.timeline.active.is_some();
+        let diagnostics = self.diagnostics();
         Snapshot {
             phase: if active {
                 Phase::Recording
@@ -454,10 +504,11 @@ impl Recording {
                 } else {
                     frames
                 };
-                self.inputs[i].status(count, active, self.gaps[i])
+                self.inputs[i].status(count, active, diagnostics[i])
             }),
             message: None,
             bookmarks: self.files.session.bookmarks.len(),
+            session_id: None,
         }
     }
 
@@ -479,6 +530,15 @@ impl Recording {
                 && !issues.iter().any(|issue| issue.contains(fault))
             {
                 issues.push(fault.clone());
+            }
+        }
+        for (source, stats) in Source::ALL.into_iter().zip(self.events) {
+            if stats.dropped_source_frames != 0 {
+                issues.push(format!(
+                    "{} lost {} source frames during capture queue overruns.",
+                    source.label(),
+                    stats.dropped_source_frames
+                ));
             }
         }
         self.update_metadata();
@@ -516,6 +576,7 @@ impl Recording {
         match &result {
             Ok(session) => {
                 snapshot.frames = session.duration_frames;
+                snapshot.session_id = Some(session.id.clone());
                 snapshot.phase = if session.issues.is_empty() {
                     Phase::Saved
                 } else {
@@ -589,7 +650,7 @@ impl AudioTest {
         Snapshot {
             phase: Phase::Testing,
             tracks: std::array::from_fn(|i| match &self.inputs[i] {
-                Some(input) => input.status(0, true, 0),
+                Some(input) => input.status(0, true, TrackDiagnostics::default()),
                 None => TrackStatus {
                     issue: self.errors[i].clone(),
                     ..TrackStatus::default()

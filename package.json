@@ -1,10 +1,10 @@
 {
   "name": "nexq-recorder",
-  "version": "0.1.0",
+  "version": "1.0.0-rc.1",
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check ui/app.js",
+    "check": "node --check ui/app.js && node --check ui/library.js && node --test scripts/library.test.mjs",
     "tauri": "tauri",
     "build": "tauri build --ci -- --locked"
   },

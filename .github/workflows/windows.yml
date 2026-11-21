@@ -48,7 +48,7 @@ jobs:
         run: |
           $installer = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe)
           if ($installer.Count -ne 1) { throw "Expected one x64 NSIS installer." }
-          ./scripts/smoke-windows.ps1 -Installer $installer[0].FullName
+          ./scripts/smoke-windows.ps1 -Installer $installer[0].FullName -VerifyReinstall
       - name: Stage versioned distribution files
         run: |
           $installer = Get-Item src-tauri/target/release/bundle/nsis/*-setup.exe
@@ -56,8 +56,10 @@ jobs:
           Copy-Item -LiteralPath $installer.FullName -Destination dist
           Copy-Item -LiteralPath src-tauri/target/release/nexq-recorder.exe -Destination dist
           Copy-Item -LiteralPath LICENSE -Destination dist/LICENSE.txt
-          $sha256 = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$sha256  $($installer.Name)" | Set-Content -Encoding ascii "dist/$($installer.Name).sha256"
+          Get-ChildItem -LiteralPath dist -File -Filter '*.exe' | ForEach-Object {
+            $sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$sha256  $($_.Name)"
+          } | Set-Content -Encoding ascii dist/SHA256SUMS.txt
       - uses: actions/upload-artifact@v6
         with:
           name: nexq-recorder-windows-x64

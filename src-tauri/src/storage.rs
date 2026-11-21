@@ -1,6 +1,6 @@
 //! Separate streaming WAV sinks follow MeetRec's storage.rs (MIT).
 
-use crate::capture::Device;
+use crate::capture::{CaptureEvents, Device};
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
@@ -97,6 +97,17 @@ pub struct TrackInfo {
     pub captured_frames: u64,
     pub last_capture_frame: u64,
     pub discontinuities: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<TrackDiagnostics>,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackDiagnostics {
+    #[serde(flatten)]
+    pub events: CaptureEvents,
+    pub silence_frames: u64,
+    pub overlap_frames: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -289,8 +300,35 @@ pub fn find(settings: &Settings, id: &str) -> Result<(PathBuf, Session)> {
 
 #[derive(Serialize)]
 pub struct Library {
-    pub sessions: Vec<Session>,
+    pub sessions: Vec<LibraryEntry>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryEntry {
+    #[serde(flatten)]
+    pub session: Session,
+    pub bytes: u64,
+    pub available_tracks: [bool; 2],
+}
+
+fn library_entry(folder: &Path, session: Session) -> LibraryEntry {
+    let sizes: [Option<u64>; 2] = std::array::from_fn(|track| {
+        track_path(folder, track)
+            .ok()
+            .and_then(|path| fs::metadata(path).ok())
+            .map(|data| data.len())
+    });
+    LibraryEntry {
+        session,
+        bytes: sizes.iter().flatten().sum(),
+        available_tracks: std::array::from_fn(|index| {
+            track_path(folder, index)
+                .ok()
+                .is_some_and(|path| hound::WavReader::open(path).is_ok())
+        }),
+    }
 }
 
 pub fn library(settings: &Settings) -> Library {
@@ -324,12 +362,12 @@ pub fn library(settings: &Settings) -> Library {
                     // The recording may have finished between reading the manifest and locking it.
                     let latest = read_session(&folder, &id)?;
                     return if latest.state == SaveState::InProgress {
-                        recover(&folder, latest)
+                        recover(&folder, latest).map(|session| library_entry(&folder, session))
                     } else {
-                        Ok(latest)
+                        Ok(library_entry(&folder, latest))
                     };
                 }
-                Ok(session)
+                Ok(library_entry(&folder, session))
             });
             match session {
                 Ok(session) => result.sessions.push(session),
@@ -347,17 +385,21 @@ pub fn library(settings: &Settings) -> Library {
     }
     result
         .sessions
-        .sort_by_key(|item| std::cmp::Reverse(item.started_at));
+        .sort_by_key(|item| std::cmp::Reverse(item.session.started_at));
     result
 }
 
-pub fn rename(folder: &Path, mut session: Session, name: &str) -> Result<()> {
+pub fn rename(folder: &Path, name: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
         return Err("Enter a recording name between 1 and 100 characters.".into());
     }
-    session.name = name.to_owned();
-    session.save(folder)
+    let manifest = owned_file(folder, MANIFEST)?;
+    // Change only the requested name, including when older metadata has fields
+    // this build does not use.
+    let mut data: serde_json::Value = serde_json::from_reader(File::open(&manifest)?)?;
+    data["name"] = serde_json::Value::String(name.to_owned());
+    atomic_json(&manifest, &data)
 }
 
 pub fn track_path(folder: &Path, track: usize) -> Result<PathBuf> {
@@ -365,44 +407,140 @@ pub fn track_path(folder: &Path, track: usize) -> Result<PathBuf> {
     owned_file(folder, name)
 }
 
+pub fn suggested_name(session: &Session, track: Option<usize>) -> String {
+    let stem = session
+        .name
+        .chars()
+        .take(60)
+        .map(|character| {
+            if character.is_control() || "<>:\"/\\|?*".contains(character) {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let stem = stem.trim_matches(['.', ' ']);
+    match track {
+        Some(index) => {
+            let label = TRACK_FILES[index].trim_end_matches(".wav");
+            format!("NexQ - {stem} - {label}.wav")
+        }
+        None => format!("NexQ - {stem} - {}", &session.id[..8]),
+    }
+}
+
+fn check_space(destination: &Path, bytes: u64) -> Result<()> {
+    if fs2::available_space(destination).is_ok_and(|available| available < bytes) {
+        return Err("Not enough free space for this export. Choose another drive.".into());
+    }
+    Ok(())
+}
+
+fn export_error(error: io::Error) -> String {
+    match error.kind() {
+        io::ErrorKind::AlreadyExists => {
+            "That export already exists. Choose another name or folder.".into()
+        }
+        io::ErrorKind::PermissionDenied => format!(
+            "Windows denied access to this export destination. Choose a writable location. ({error})"
+        ),
+        io::ErrorKind::StorageFull => {
+            format!("The destination ran out of space. Choose another drive. ({error})")
+        }
+        _ => format!("Could not complete the export: {error}"),
+    }
+}
+
+pub fn export_track(folder: &Path, track: usize, destination: &Path) -> Result<PathBuf> {
+    let source = track_path(folder, track)?;
+    let parent = destination
+        .parent()
+        .ok_or("Choose an export folder.")?
+        .canonicalize()?;
+    if parent.starts_with(folder) {
+        return Err("Choose an export location outside this recording.".into());
+    }
+    let name = destination
+        .file_name()
+        .ok_or("Choose a filename for the exported WAV.")?;
+    let destination = parent.join(name);
+    if destination.exists() {
+        return Err(export_error(io::Error::from(io::ErrorKind::AlreadyExists)).into());
+    }
+    let mut input = File::open(source)?;
+    check_space(&parent, input.metadata()?.len())?;
+    let mut staging = NamedTempFile::new_in(&parent).map_err(export_error)?;
+    io::copy(&mut input, &mut staging).map_err(export_error)?;
+    staging.as_file().sync_all().map_err(export_error)?;
+    staging
+        .persist_noclobber(&destination)
+        .map_err(|error| export_error(error.error))?;
+    Ok(destination)
+}
+
 pub fn export(folder: &Path, destination: &Path, session: &Session) -> Result<PathBuf> {
     let destination = destination.canonicalize()?;
     if destination.starts_with(folder) {
         return Err("Choose an export folder outside this recording.".into());
     }
-    let staging = tempdir_in(&destination)?;
-    for (track, name) in TRACK_FILES.iter().enumerate() {
-        fs::copy(track_path(folder, track)?, staging.path().join(name))?;
+    let output = destination.join(suggested_name(session, None));
+    if output.exists() {
+        return Err(export_error(io::Error::from(io::ErrorKind::AlreadyExists)).into());
     }
-    session.save(staging.path())?;
-    let output = destination.join(format!(
-        "NexQ-{}-{}",
-        session.started_at.format("%Y%m%d-%H%M%S"),
-        &session.id[..8],
-    ));
-    fs::rename(staging.path(), &output).map_err(|error| {
-        format!(
-            "Could not export to {} ({error}). Choose another folder if this copy already exists.",
-            display_path(&output),
-        )
+    let sources = [
+        track_path(folder, 0)?,
+        track_path(folder, 1)?,
+        owned_file(folder, MANIFEST)?,
+    ];
+    let bytes = sources.iter().try_fold(0u64, |sum, path| {
+        Ok::<_, io::Error>(sum.saturating_add(fs::metadata(path)?.len()))
     })?;
+    check_space(&destination, bytes)?;
+    let staging = tempdir_in(&destination).map_err(export_error)?;
+    for (source, name) in sources
+        .iter()
+        .zip([TRACK_FILES[0], TRACK_FILES[1], MANIFEST])
+    {
+        let mut input = File::open(source)?;
+        let mut copy = File::create_new(staging.path().join(name)).map_err(export_error)?;
+        io::copy(&mut input, &mut copy).map_err(export_error)?;
+        copy.sync_all().map_err(export_error)?;
+    }
+    // Windows does not replace an existing directory when renaming a directory.
+    fs::rename(staging.path(), &output).map_err(export_error)?;
     Ok(output)
 }
 
 pub fn delete(folder: &Path, session: &Session) -> Result<()> {
+    for entry in fs::read_dir(folder)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !name.to_str().is_some_and(|name| {
+            [TRACK_FILES[0], TRACK_FILES[1], MANIFEST, RECORDING_LOCK].contains(&name)
+        }) || !entry.file_type()?.is_file()
+        {
+            return Err("This folder contains files outside the recording. Open the folder to review them before deleting.".into());
+        }
+    }
     let holding = folder.with_file_name(format!(
         ".deleted-{}-{}",
         session.id,
         Uuid::new_v4().simple()
     ));
     fs::rename(folder, &holding)?;
-    if let Err(error) = fs::remove_dir_all(&holding) {
-        return Err(format!(
-            "Could not finish deleting {} ({error}).",
-            display_path(&holding)
-        )
-        .into());
+    for name in [TRACK_FILES[0], TRACK_FILES[1], RECORDING_LOCK, MANIFEST] {
+        if let Err(error) = fs::remove_file(holding.join(name))
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            return Err(format!(
+                "Could not finish deleting {} ({error}).",
+                display_path(&holding)
+            )
+            .into());
+        }
     }
+    fs::remove_dir(&holding)?;
     Ok(())
 }
 
@@ -424,29 +562,79 @@ fn recover(folder: &Path, mut session: Session) -> Result<Session> {
 }
 
 pub fn salvage(folder: &Path, mut session: Session) -> Result<Session> {
-    let mut files = [
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(track_path(folder, 0)?)?,
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(track_path(folder, 1)?)?,
-    ];
-    let frames = recoverable_frames(&mut files[0])?.min(recoverable_frames(&mut files[1])?);
-    for file in &mut files {
-        repair_header(file, frames)?;
-    }
-    for track in &mut session.tracks {
-        track.captured_frames = track.captured_frames.min(frames);
-        track.last_capture_frame = track.last_capture_frame.min(frames);
+    let mut files: [Option<(File, u64)>; 2] = std::array::from_fn(|index| {
+        let open = || -> Result<_> {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(track_path(folder, index)?)?;
+            let frames = recoverable_frames(&mut file)?;
+            repair_header(&mut file, frames)?;
+            Ok((file, frames))
+        };
+        match open() {
+            Ok(file) => Some(file),
+            Err(error) => {
+                session
+                    .issues
+                    .push(format!("Could not recover {}: {error}", TRACK_FILES[index]));
+                None
+            }
+        }
+    });
+    let frames = files
+        .iter()
+        .flatten()
+        .map(|(_, frames)| *frames)
+        .max()
+        .ok_or("Neither WAV could be repaired. Original files were kept.")?;
+    for (index, recovered) in files.iter_mut().enumerate() {
+        let Some((file, original)) = recovered else {
+            continue;
+        };
+        let track = &mut session.tracks[index];
+        track.captured_frames = track.captured_frames.min(*original);
+        track.last_capture_frame = track.last_capture_frame.min(*original);
+        if *original < frames {
+            match pad_recovered(file, *original, frames) {
+                Ok(()) => {
+                    let added = frames - *original;
+                    track
+                        .diagnostics
+                        .get_or_insert_with(TrackDiagnostics::default)
+                        .silence_frames += added;
+                    session.issues.push(format!(
+                        "{} was padded with {added} silent frames during recovery.",
+                        TRACK_FILES[index]
+                    ));
+                }
+                Err(error) => session
+                    .issues
+                    .push(format!("Could not align {}: {error}", TRACK_FILES[index])),
+            }
+        }
     }
     session.bookmarks.retain(|&frame| frame <= frames);
     session.pauses.retain(|pause| pause.at_frame <= frames);
     session.duration_frames = frames;
     session.save(folder)?;
     Ok(session)
+}
+
+fn pad_recovered(file: &mut File, original: u64, target: u64) -> Result<()> {
+    let original_end = WAV_HEADER_SIZE + original * 2;
+    file.seek(SeekFrom::Start(original_end))?;
+    let mut remaining = (target - original) * 2;
+    let zeroes = [0; 8192];
+    while remaining > 0 {
+        let count = remaining.min(zeroes.len() as u64) as usize;
+        if let Err(error) = file.write_all(&zeroes[..count]) {
+            repair_header(file, original)?;
+            return Err(error.into());
+        }
+        remaining -= count as u64;
+    }
+    repair_header(file, target)
 }
 
 fn recoverable_frames(file: &mut File) -> Result<u64> {
@@ -501,6 +689,7 @@ mod tests {
             captured_frames: 0,
             last_capture_frame: 0,
             discontinuities: 0,
+            diagnostics: None,
         })
     }
 
@@ -529,13 +718,13 @@ mod tests {
         let settings = settings(home.path());
         let (folder, session) = save_example(&settings.folder);
         assert_eq!(library(&settings).sessions.len(), 1);
-        rename(&folder, session.clone(), "Operations interview").unwrap();
+        rename(&folder, "Operations interview").unwrap();
         let (_, renamed) = find(&settings, &session.id).unwrap();
         assert_eq!(renamed.name, "Operations interview");
         assert_eq!(renamed.tracks[0].source_rate, 48_000);
         assert_eq!(renamed.duration_frames, 3);
-        assert!(rename(&folder, renamed.clone(), " ").is_err());
-        assert!(rename(&folder, renamed.clone(), "Bad\nname").is_err());
+        assert!(rename(&folder, " ").is_err());
+        assert!(rename(&folder, "Bad\nname").is_err());
         let copy = export(&folder, destination.path(), &renamed).unwrap();
         for track in 0..2 {
             assert_eq!(
@@ -580,15 +769,26 @@ mod tests {
         drop(lock);
         let result = library(&settings);
         assert!(result.warnings.is_empty());
-        let recovered = &result.sessions[0];
+        let recovered = &result.sessions[0].session;
         assert!(recovered.state == SaveState::Recovered);
         assert_eq!(recovered.id, session.id);
-        assert_eq!(recovered.duration_frames, 2);
+        assert_eq!(recovered.duration_frames, 4);
         for track in 0..2 {
-            let reader = hound::WavReader::open(track_path(&folder, track).unwrap()).unwrap();
-            assert_eq!(reader.duration(), 2);
+            let mut reader = hound::WavReader::open(track_path(&folder, track).unwrap()).unwrap();
+            let data: Vec<_> = reader
+                .samples::<i16>()
+                .map(|sample| sample.unwrap())
+                .collect();
+            assert_eq!(
+                data,
+                if track == 0 {
+                    vec![100, 200, 300, 513]
+                } else {
+                    vec![100, 200, 0, 0]
+                }
+            );
         }
-        assert_eq!(library(&settings).sessions[0].issues.len(), 1);
+        assert_eq!(library(&settings).sessions[0].session.issues.len(), 2);
     }
 
     #[test]
@@ -607,5 +807,87 @@ mod tests {
         assert_eq!(restored.microphone, config.microphone);
         assert_eq!(restored.previous_folders, config.previous_folders);
         assert_eq!(library(&restored).sessions.len(), 1);
+    }
+
+    #[test]
+    fn single_track_export_is_byte_identical_and_never_replaces_a_file() {
+        let home = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let settings = settings(home.path());
+        let (folder, session) = save_example(&settings.folder);
+        let output = destination.path().join(suggested_name(&session, Some(0)));
+        let saved = export_track(&folder, 0, &output).unwrap();
+        assert_eq!(
+            fs::read(&saved).unwrap(),
+            fs::read(track_path(&folder, 0).unwrap()).unwrap()
+        );
+        fs::write(&saved, "existing file").unwrap();
+        assert!(export_track(&folder, 1, &output).is_err());
+        assert_eq!(fs::read(&saved).unwrap(), b"existing file");
+        assert!(export_track(&folder, 0, &folder.join("copy.wav")).is_err());
+        assert!(export_track(&folder, 8, &output).is_err());
+        assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn legacy_session_is_readable_without_metadata_changes_and_export_retains_original_json() {
+        let home = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let settings = settings(home.path());
+        let (folder, session) = save_example(&settings.folder);
+        let path = folder.join(MANIFEST);
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        legacy["legacyExtension"] = serde_json::Value::Bool(true);
+        let original = serde_json::to_vec(&legacy).unwrap();
+        fs::write(&path, &original).unwrap();
+        let result = library(&settings);
+        assert!(result.sessions[0].session.tracks[0].diagnostics.is_none());
+        assert_eq!(result.sessions[0].available_tracks, [true, true]);
+        let path_to_track = folder.join(TRACK_FILES[0]);
+        let original_permissions = fs::metadata(&path_to_track).unwrap().permissions();
+        let mut readonly = original_permissions.clone();
+        readonly.set_readonly(true);
+        fs::set_permissions(&path_to_track, readonly).unwrap();
+        let exported = export(&folder, destination.path(), &session);
+        fs::set_permissions(&path_to_track, original_permissions).unwrap();
+        let exported = exported.unwrap();
+        assert_eq!(fs::read(exported.join(MANIFEST)).unwrap(), original);
+        assert_eq!(fs::read(path).unwrap(), original);
+        rename(&folder, "Renamed").unwrap();
+        let renamed: serde_json::Value =
+            serde_json::from_reader(File::open(folder.join(MANIFEST)).unwrap()).unwrap();
+        assert_eq!(renamed["legacyExtension"], true);
+        assert_eq!(renamed["name"], "Renamed");
+    }
+
+    #[test]
+    fn deletion_declines_unmanaged_files_and_reports_permission_errors() {
+        let home = tempfile::tempdir().unwrap();
+        let settings = settings(home.path());
+        let (folder, session) = save_example(&settings.folder);
+        let custom = folder.join("personal.txt");
+        fs::write(&custom, "keep").unwrap();
+        assert!(delete(&folder, &session).is_err());
+        assert_eq!(fs::read(custom).unwrap(), b"keep");
+        assert!(track_path(&folder, 0).is_ok());
+        assert!(export_error(io::Error::from(io::ErrorKind::PermissionDenied)).contains("denied"));
+        assert!(export_error(io::Error::from(io::ErrorKind::StorageFull)).contains("space"));
+    }
+
+    #[test]
+    fn interrupted_session_with_a_missing_source_keeps_its_other_wav() {
+        let home = tempfile::tempdir().unwrap();
+        let settings = settings(home.path());
+        let (folder, mut session) = save_example(&settings.folder);
+        let original = fs::read(folder.join(TRACK_FILES[0])).unwrap();
+        fs::remove_file(folder.join(TRACK_FILES[1])).unwrap();
+        session.state = SaveState::InProgress;
+        session.save(&folder).unwrap();
+        let library = library(&settings);
+        let recovered = &library.sessions[0];
+        assert!(recovered.session.state == SaveState::Recovered);
+        assert_eq!(recovered.available_tracks, [true, false]);
+        assert_eq!(fs::read(folder.join(TRACK_FILES[0])).unwrap(), original);
     }
 }

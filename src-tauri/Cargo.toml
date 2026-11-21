@@ -1,6 +1,6 @@
 [package]
 name = "nexq-recorder"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 edition = "2024"
 description = "Simple, private, dual-track audio recording"
 license = "MIT"
