@@ -81,8 +81,8 @@ try {
       throw 'Run installer tests under a Windows account without an existing NexQ installation.'
     }
     $Installer = (Resolve-Path -LiteralPath $Installer).Path
-    Install-Nexq
     $Executable = Join-Path $installation 'nexq-recorder.exe'
+    Install-Nexq
   }
   $Executable = (Resolve-Path -LiteralPath $Executable).Path
   if ($LibraryFixture -or $VerifyReinstall) {

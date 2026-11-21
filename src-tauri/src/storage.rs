@@ -502,13 +502,10 @@ pub fn export(folder: &Path, destination: &Path, session: &Session) -> Result<Pa
         .iter()
         .zip([TRACK_FILES[0], TRACK_FILES[1], MANIFEST])
     {
-        let copy = staging.path().join(name);
-        fs::copy(source, &copy).map_err(export_error)?;
-        File::options()
-            .write(true)
-            .open(&copy)
-            .and_then(|file| file.sync_all())
-            .map_err(export_error)?;
+        let mut input = File::open(source)?;
+        let mut copy = File::create_new(staging.path().join(name)).map_err(export_error)?;
+        io::copy(&mut input, &mut copy).map_err(export_error)?;
+        copy.sync_all().map_err(export_error)?;
     }
     // Windows does not replace an existing directory when renaming a directory.
     fs::rename(staging.path(), &output).map_err(export_error)?;
@@ -847,7 +844,14 @@ mod tests {
         let result = library(&settings);
         assert!(result.sessions[0].session.tracks[0].diagnostics.is_none());
         assert_eq!(result.sessions[0].available_tracks, [true, true]);
-        let exported = export(&folder, destination.path(), &session).unwrap();
+        let path_to_track = folder.join(TRACK_FILES[0]);
+        let original_permissions = fs::metadata(&path_to_track).unwrap().permissions();
+        let mut readonly = original_permissions.clone();
+        readonly.set_readonly(true);
+        fs::set_permissions(&path_to_track, readonly).unwrap();
+        let exported = export(&folder, destination.path(), &session);
+        fs::set_permissions(&path_to_track, original_permissions).unwrap();
+        let exported = exported.unwrap();
         assert_eq!(fs::read(exported.join(MANIFEST)).unwrap(), original);
         assert_eq!(fs::read(path).unwrap(), original);
         rename(&folder, "Renamed").unwrap();
