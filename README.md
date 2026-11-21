@@ -4,6 +4,8 @@ Simple, private, dual-track audio recording for Windows.
 
 One button records **Interviewer** (your selected Windows playback device via WASAPI loopback) and **Me** (your selected microphone). Both tracks have live audio meters, duration counters, and their own WAV files. Pausing removes the paused interval from both tracks. Bookmarks save timestamps in the session metadata.
 
+![NexQ Recorder on Windows, ready to record both tracks](docs/recorder.png)
+
 ## Install and record
 
 1. Open a successful **Windows build** run and download the `nexq-recorder-windows-x64` artifact. Extract it and run `NexQ Recorder_0.1.0_x64-setup.exe`. For portable use, run `nexq-recorder.exe` on a machine with the Microsoft Edge WebView2 Runtime. [GitHub Actions](https://github.com/vincentlow02/forrecord/actions/workflows/windows.yml)
