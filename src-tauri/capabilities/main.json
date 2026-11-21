@@ -1,0 +1,6 @@
+{
+  "identifier": "main",
+  "description": "Local NexQ Recorder window",
+  "windows": ["main"],
+  "permissions": []
+}

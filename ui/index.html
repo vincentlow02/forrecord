@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NexQ Recorder</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <svg class="symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="icon-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 4v3"/></symbol>
+    <symbol id="icon-settings" viewBox="0 0 24 24"><path d="m9.6 3-.5 2.1-1.7.9-2-.7-1.9 3.3L5 10.2v2l-1.5 1.6 1.9 3.3 2-.6 1.7.9.5 2.1h3.8l.5-2.1 1.7-.9 2 .6 1.9-3.3-1.5-1.6v-2l1.5-1.6-1.9-3.3-2 .7-1.7-.9-.5-2.1z" transform="translate(.5 .6)"/><circle cx="12" cy="11.8" r="3.1"/></symbol>
+    <symbol id="icon-library" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 10h10M7 14h6"/></symbol>
+    <symbol id="icon-display" viewBox="0 0 24 24"><rect x="2.5" y="3.5" width="19" height="13.5" rx="2"/><path d="M12 17v4m-4.5 0h9"/></symbol>
+    <symbol id="icon-mic" viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="13" rx="4"/><path d="M4.5 11.5a7.5 7.5 0 0 0 15 0M12 19v3m-3.5 0h7"/></symbol>
+    <symbol id="icon-pause" viewBox="0 0 24 24"><path d="M9 5v14m6-14v14" stroke-width="3"/></symbol>
+    <symbol id="icon-play" viewBox="0 0 24 24"><path d="m9 5 11 7-11 7z" fill="currentColor" stroke-linejoin="round"/></symbol>
+    <symbol id="icon-stop" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="icon-bookmark" viewBox="0 0 24 24"><path d="M6.5 21V5a1.5 1.5 0 0 1 1.5-1.5h8A1.5 1.5 0 0 1 17.5 5v16L12 17.5z"/></symbol>
+    <symbol id="icon-close" viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></symbol>
+    <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 18V6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></symbol>
+  </svg>
+
+  <header class="topbar">
+    <h1><strong>NexQ</strong> Recorder</h1>
+    <div class="top-actions">
+      <span class="privacy"><svg><use href="#icon-lock"/></svg><span>Local only</span></span>
+      <span class="divider" aria-hidden="true"></span>
+      <button id="history-button" class="icon-button" aria-label="Recording history" title="Recording history"><svg><use href="#icon-library"/></svg></button>
+      <button id="settings-button" class="icon-button" aria-label="Settings" title="Settings"><svg><use href="#icon-settings"/></svg></button>
+    </div>
+  </header>
+
+  <main class="recorder" aria-label="Recorder">
+    <section class="clock" aria-label="Session">
+      <div id="phase" class="phase" data-state="idle" role="status"><span class="phase-dot"></span><span id="phase-text">Ready</span></div>
+      <time id="session-time" class="session-time" aria-label="Session time">00:00:00</time>
+    </section>
+    <div class="tracks">
+      <section class="track interviewer" aria-labelledby="interviewer-title">
+        <div class="track-header">
+          <svg class="track-icon"><use href="#icon-display"/></svg>
+          <div class="track-name"><h2 id="interviewer-title">Interviewer</h2><p data-device="0">System audio</p></div>
+          <time data-track-time="0" aria-label="Interviewer track duration">00:00:00</time>
+        </div>
+        <div class="wave" data-wave="0" aria-hidden="true"></div>
+      </section>
+      <section class="track me" aria-labelledby="me-title">
+        <div class="track-header">
+          <svg class="track-icon"><use href="#icon-mic"/></svg>
+          <div class="track-name"><h2 id="me-title">Me</h2><p data-device="1">Microphone</p></div>
+          <time data-track-time="1" aria-label="Microphone track duration">00:00:00</time>
+        </div>
+        <div class="wave" data-wave="1" aria-hidden="true"></div>
+      </section>
+    </div>
+    <div class="transport" aria-label="Recording controls">
+      <button id="pause-button" class="transport-side" aria-label="Pause recording" title="Pause recording" hidden><svg><use href="#icon-pause"/></svg></button>
+      <button id="record-button" class="record-button" aria-label="Start recording" title="Start recording" disabled><svg><use href="#icon-mic"/></svg></button>
+      <button id="bookmark-button" class="transport-side" aria-label="Add bookmark" title="Add bookmark" hidden><svg><use href="#icon-bookmark"/></svg></button>
+    </div>
+    <p id="notice" class="notice" aria-live="polite"></p>
+  </main>
+
+  <dialog id="settings-dialog" aria-labelledby="settings-heading">
+    <div class="dialog-header">
+      <h2 id="settings-heading">Settings</h2>
+      <button type="button" class="icon-button dialog-close" aria-label="Close settings"><svg><use href="#icon-close"/></svg></button>
+    </div>
+    <form id="settings-form">
+      <p id="settings-notice" class="dialog-notice" role="status"></p>
+      <div class="setting">
+        <label for="output-device">Interviewer <span>System audio</span></label>
+        <select id="output-device"></select>
+      </div>
+      <div class="setting">
+        <label for="mic-device">Me <span>Microphone</span></label>
+        <select id="mic-device"></select>
+      </div>
+      <div class="setting">
+        <label for="recordings-folder">Recordings folder</label>
+        <div class="folder-field">
+          <input id="recordings-folder" type="text" readonly>
+          <button type="button" id="browse-folder" class="button">Browse</button>
+        </div>
+        <p id="free-space" class="muted"></p>
+      </div>
+      <section id="device-test" class="device-test" aria-label="Audio device test">
+        <div><span>Interviewer</span><meter id="test-output" min="0" max="1" value="0" aria-label="System audio level"></meter><small id="test-output-issue"></small></div>
+        <div><span>Me</span><meter id="test-mic" min="0" max="1" value="0" aria-label="Microphone level"></meter><small id="test-mic-issue"></small></div>
+      </section>
+      <p id="test-hint" class="muted" hidden>Play sound through your output device and speak into your microphone. The test ends in 30 seconds.</p>
+      <div class="dialog-actions">
+        <button id="test-button" type="button" class="button">Test devices</button>
+        <button type="submit" id="save-settings" class="button dark">Save settings</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="history-dialog" class="history-dialog" aria-labelledby="history-heading">
+    <div class="dialog-header">
+      <h2 id="history-heading">Recordings</h2>
+      <button type="button" class="icon-button dialog-close" aria-label="Close history"><svg><use href="#icon-close"/></svg></button>
+    </div>
+    <p id="history-notice" class="dialog-notice" role="status"></p>
+    <div id="history-list" class="history-list"></div>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title">
+    <form method="dialog" id="confirm-form">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-copy" class="muted"></p>
+      <input id="confirm-name" type="text" aria-label="Recording name" maxlength="100">
+      <div class="dialog-actions">
+        <button class="button" value="cancel" formnovalidate>Cancel</button>
+        <button class="button dark" id="confirm-action" value="confirm">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
