@@ -303,6 +303,7 @@ fn test_input(result: std::result::Result<Input, String>) -> (Option<Input>, Opt
 
 pub struct AppState {
     pub engine: std::result::Result<Engine, String>,
+    pub folder_grant: Mutex<Option<PathBuf>>,
 }
 
 impl AppState {
